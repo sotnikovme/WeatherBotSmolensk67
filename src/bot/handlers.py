@@ -103,14 +103,14 @@ async def on_city_selected(callback: CallbackQuery) -> None:
 
             if weather_data is None:
                 # 3. Fetch from OWM
-                weather_data = await _weather.get_current(city)
+                weather_data = await _weather.get_forecast(city)
                 await _cache.set_weather(city.name, weather_data)
 
             # 4. Generate post via GigaChat
             post = await _gigachat.generate_post(weather_data)
             await _cache.set_post(city.name, post)
 
-        text = f"📍 *{escape_md(city.name)}*\n\n{escape_md(post)}"
+        text = escape_md(post)
         await wait_msg.edit_text(text, parse_mode="MarkdownV2")
 
     except Exception:

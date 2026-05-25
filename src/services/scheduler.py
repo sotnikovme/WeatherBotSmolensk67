@@ -32,7 +32,7 @@ async def job_morning_post(
         from src.config import SMOLENSK_CITIES
 
         city = SMOLENSK_CITIES[0]  # Смоленск
-        data = await weather.get_current(city)
+        data = await weather.get_forecast(city)
 
         # Check cache first
         post = await cache.get_post(city.name)

@@ -1,4 +1,4 @@
-"""GigaChat LLM bridge — generates literary weather posts."""
+"""GigaChat bridge for weather posts and alerts."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from src.config import Settings, settings
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
-    "Роль: Ты — ведущий синоптик Смоленской области с 20-летним стажем и талантом писателя. "
     "Твоя задача — превращать сухие цифры прогноза в захватывающие и информативные посты для telegram для жителей региона.\n\n"
     "Стиль текста:\n"
     "Заголовки: Всегда используй яркие метафоры (например, «СЕВЕРНЫЙ ТАНЕЦ ЦИКЛОНОВ», «ДЫХАНИЕ АРКТИКИ»).\n"
@@ -24,27 +23,29 @@ SYSTEM_PROMPT = (
     "Структура:\n"
     "1. Эпичный заголовок.\n"
     "2. Аналитический блок (описание ситуации: кто виноват — циклон, антициклон или фронт).\n"
-    "3. Детальный прогноз по Смоленску (утро, день, вечер, ночь).\n"
-    "4. Краткий обзор по частям области (Север, Восток, Юг, Запад, Центр).\n"
-    "5. Блок предупреждений (гололедица, метель, давление).\n"
+    "3. Прогноз по Смоленску (утро, день, вечер, ночь) в сдержанном стиле, без лишнего текста с добавлянием стикеров.\n"
+    "Нужны четкие данные, например:\n"
+    "Ночь от +10 до +11"
+    "Утро от +11 до +12"
+    "День от +12 до +13"
+    "Вечер от +14 до +16"
+    "4. Краткий обзор по частям (Север, Восток, Юг, Запад, Центр).\n"
+    "5. Блок предупреждений.\n"
     # "6. Астрономия.\n\n"
     "Контекст данных: Тебе будут переданы цифры: температура, влажность, давление, скорость ветра. "
     "Твоя работа — «одеть» их в текст. Если в данных есть резкий перепад давления или сильный ветер — "
     "выноси это в предупреждения.\n\n"
     "Важное правило: Никогда не выдумывай названия городов вне Смоленской области. "
     "Не используй markdown разметку."
-    "Не используй знак звёздочки '*'."
+    "Не выделяй заговоки(жирным шрифтом, курсивом и так далее)."
     "Используй только: Смоленск, Вязьма, Рославль, Ярцево, Сафоново, Гагарин, Десногорск, Починок, Дорогобуж, Ельня, Рудня, Велиж, Демидов, Духовщина, Сычёвка.\n\n"
     "добавляй в пост тематические стикеры для telegram, например ⛅, ☁, ☁, 🌨, ❄, 🌬, ⚡️"
-    "В прогноз добавляй отдельно блок с температурой например:"
-    "Ночь 🌨 -10...-11"
-    "Облачно. Снег. "
-    "Утро ❄ -11"
-    "Облачно. Небольшой снег. "
-    "День ☁ -12...-13"
-    "Облачно. "
-    "Вечер ⛅ -14...-16"
-    # "В прогноз добавляй отдельно в тексте точные цифровые данные(например: какой-то текст 'перенос строки' температура: днем ... ночью ...)"
+    # "В прогноз добавляй отдельно блок с температурой без лишнего текста и украшения"
+    # "Он долджен выглядеть строго так:"
+    # "Ночь от +10 до +11"
+    # "Утро от +11 до +12"
+    # "День от +12 до +13"
+    # "Вечер от +14 до +16"
 )
 
 
@@ -54,10 +55,6 @@ class GigaChatService:
     def __init__(self, cfg: Settings | None = None) -> None:
         self._cfg = cfg or settings
         self._client: GigaChat | None = None
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     async def start(self) -> None:
         self._client = GigaChat(
@@ -72,20 +69,17 @@ class GigaChatService:
             await self._client.aclose()
             self._client = None
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     async def generate_post(self, weather_data: dict[str, Any]) -> str:
-        """Generate a literary weather post from raw weather data."""
+        """Generate a literary weather post from forecast data."""
         assert self._client is not None, "Call start() first"
-
-        user_content = self._build_user_prompt(weather_data)
 
         chat = Chat(
             messages=[
                 Messages(role=MessagesRole.SYSTEM, content=SYSTEM_PROMPT),
-                Messages(role=MessagesRole.USER, content=user_content),
+                Messages(
+                    role=MessagesRole.USER,
+                    content=self._build_user_prompt(weather_data),
+                ),
             ],
         )
 
@@ -101,10 +95,10 @@ class GigaChatService:
         assert self._client is not None, "Call start() first"
 
         prompt = (
-            "ВНИМАНИЕ! Погодное предупреждение для Смоленской области.\n"
-            "Данные:\n" + json.dumps(alerts, ensure_ascii=False, indent=2) + "\n"
-            "Напиши краткое и чёткое предупреждение для жителей на русском языке. "
-            "Тон — серьёзный, но не паникующий. 2-3 предложения."
+            "Составь краткое и четкое погодное предупреждение для жителей Смоленской области.\n"
+            "Данные:\n"
+            f"{json.dumps(alerts, ensure_ascii=False, indent=2)}\n"
+            "Тон спокойный и серьезный. 2-3 предложения."
         )
 
         chat = Chat(
@@ -119,42 +113,74 @@ class GigaChatService:
             return response.choices[0].message.content
         except Exception:
             logger.exception("GigaChat alert request failed")
-            parts = []
-            for a in alerts:
-                reasons = ", ".join(a.get("alert_reasons", []))
-                parts.append(f"⚠️ {a['city']}: {reasons}")
-            return "\n".join(parts)
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+            return "\n".join(
+                f"⚠️ {alert['city']}: {', '.join(alert.get('alert_reasons', []))}"
+                for alert in alerts
+            )
 
     @staticmethod
     def _build_user_prompt(data: dict[str, Any]) -> str:
         """Format weather data into a structured text prompt."""
         now = datetime.now(timezone.utc)
-        date_str = now.strftime("%d %B %Y")
+        generated_date = now.strftime("%d.%m.%Y")
         city = data.get("city", "Смоленск")
+        period_labels = {
+            "night": "Ночь",
+            "morning": "Утро",
+            "day": "День",
+            "evening": "Вечер",
+        }
 
         lines = [
-            f"Сгенерируй пост на основе данных:",
-            f"Дата: {date_str}",
+            "Сгенерируй прогноз на основе данных ниже.",
+            f"Дата составления: {generated_date}",
+            f"Дата прогноза: {data.get('forecast_date', generated_date)}",
             f"Город: {city}",
-            f"Температура: {data.get('temp', '?')}°C (ощущается как {data.get('feels_like', '?')}°C)",
-            f"Описание: {data.get('description', '?')}",
-            f"Давление: {data.get('pressure', '?')} гПа",
-            f"Влажность: {data.get('humidity', '?')}%",
-            f"Ветер: {data.get('wind_speed', '?')} м/с (порывы до {data.get('wind_gust', '?')} м/с)",
+            f"Общее описание: {data.get('description', 'нет данных')}",
+            f"Температура за день: от {data.get('temp_min', '?')}°C до {data.get('temp_max', '?')}°C",
+            f"Среднее давление: {data.get('pressure', '?')} гПа",
+            f"Максимальная влажность: {data.get('humidity', '?')}%",
+            f"Ветер: до {data.get('wind_speed', '?')} м/с, порывы до {data.get('wind_gust', '?')} м/с",
+            "Прогноз по частям суток:",
         ]
+
+        periods = data.get("periods", {})
+        for key in ("night", "morning", "day", "evening"):
+            period = periods.get(key, {})
+            lines.append(
+                f"{period_labels[key]}: "
+                f"температура {period.get('temperature', '?')}°C, "
+                f"ощущается как {period.get('feels_like', '?')}°C, "
+                f"погода: {period.get('description', 'нет данных')}, "
+                f"влажность {period.get('humidity', '?')}%, "
+                f"давление {period.get('pressure', '?')} гПа, "
+                f"ветер {period.get('wind_speed', '?')} м/с, "
+                f"порывы {period.get('wind_gust', '?')} м/с, "
+                f"облачность {period.get('clouds', '?')}%, "
+                f"осадки {period.get('rain', 0)} мм"
+            )
 
         return "\n".join(lines)
 
     @staticmethod
     def _fallback(data: dict[str, Any]) -> str:
         """Plain-text fallback when GigaChat is unavailable."""
-        return (
-            f"🌡 {data.get('city', '?')}: {data.get('temp', '?')}°C "
-            f"(ощущается как {data.get('feels_like', '?')}°C), "
-            f"ветер {data.get('wind_speed', '?')} м/с, "
-            f"влажность {data.get('humidity', '?')}%"
-        )
+        labels = {
+            "night": "Ночь",
+            "morning": "Утро",
+            "day": "День",
+            "evening": "Вечер",
+        }
+        lines = [
+            f"🌡 {data.get('city', '?')}: {data.get('description', 'нет данных')}",
+            f"Температура за день от {data.get('temp_min', '?')}°C до {data.get('temp_max', '?')}°C.",
+        ]
+        periods = data.get("periods", {})
+        for key in ("night", "morning", "day", "evening"):
+            period = periods.get(key, {})
+            lines.append(
+                f"{labels[key]}: {period.get('temperature', '?')}°C, "
+                f"{period.get('description', 'нет данных')}, "
+                f"ветер {period.get('wind_speed', '?')} м/с."
+            )
+        return "\n".join(lines)

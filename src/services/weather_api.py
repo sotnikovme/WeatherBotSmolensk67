@@ -1,8 +1,9 @@
-"""OpenWeatherMap API client for the Smolensk region."""
+"""OpenWeatherMap forecast client for the Smolensk region."""
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -11,19 +12,21 @@ from src.config import City, Settings, SMOLENSK_CITIES, settings
 
 logger = logging.getLogger(__name__)
 
-OWM_FORECAST_URL = "https://api.openweathermap.org/data/2.5/weather"
+OWM_FORECAST_URL = "https://api.openweathermap.org/data/2.5/forecast"
+FORECAST_PERIODS: tuple[tuple[str, str], ...] = (
+    ("night", "00:00:00"),
+    ("morning", "09:00:00"),
+    ("day", "15:00:00"),
+    ("evening", "21:00:00"),
+)
 
 
 class WeatherService:
-    """Fetches current weather data from OpenWeatherMap."""
+    """Fetches forecast data from OpenWeatherMap."""
 
     def __init__(self, cfg: Settings | None = None) -> None:
         self._cfg = cfg or settings
         self._session: aiohttp.ClientSession | None = None
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     async def start(self) -> None:
         self._session = aiohttp.ClientSession()
@@ -33,12 +36,8 @@ class WeatherService:
             await self._session.close()
             self._session = None
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    async def get_current(self, city: City) -> dict[str, Any]:
-        """Return current weather dict for a single city."""
+    async def get_forecast(self, city: City) -> dict[str, Any]:
+        """Return next-day forecast split by parts of day."""
         assert self._session is not None, "Call start() first"
 
         params = {
@@ -53,66 +52,125 @@ class WeatherService:
             resp.raise_for_status()
             data: dict[str, Any] = await resp.json()
 
-        return self._parse(city, data)
+        return self._parse_forecast(city, data)
+
+    async def get_current(self, city: City) -> dict[str, Any]:
+        """Backward-compatible alias for the forecast payload."""
+        return await self.get_forecast(city)
 
     async def get_all(self) -> list[dict[str, Any]]:
-        """Fetch current weather for every city in the region."""
+        """Fetch next-day forecast for every city in the region."""
         results: list[dict[str, Any]] = []
         for city in SMOLENSK_CITIES:
             try:
-                result = await self.get_current(city)
-                results.append(result)
+                results.append(await self.get_forecast(city))
             except Exception:
                 logger.exception("Failed to fetch weather for %s", city.name)
         return results
 
     async def check_alerts(self) -> list[dict[str, Any]]:
-        """Return list of cities with extreme weather conditions."""
+        """Return cities with risky forecast conditions."""
         alerts: list[dict[str, Any]] = []
         all_weather = await self.get_all()
 
-        for w in all_weather:
+        for forecast in all_weather:
             reasons: list[str] = []
-            if w["wind_speed"] > self._cfg.wind_alert_threshold:
-                reasons.append(f"ветер {w['wind_speed']} м/с")
-            if w["temp"] < self._cfg.temp_alert_threshold:
-                reasons.append(f"температура {w['temp']}°C")
+            if forecast["wind_speed"] > self._cfg.wind_alert_threshold:
+                reasons.append(f"ветер до {forecast['wind_speed']} м/с")
+            if forecast["temp_min"] < self._cfg.temp_alert_threshold:
+                reasons.append(f"температура до {forecast['temp_min']}°C")
             if reasons:
-                alerts.append({**w, "alert_reasons": reasons})
+                alerts.append({**forecast, "alert_reasons": reasons})
 
         return alerts
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
-    def _parse(city: City, raw: dict[str, Any]) -> dict[str, Any]:
-        """Extract useful fields from raw OWM response."""
-        main = raw.get("main", {})
-        wind = raw.get("wind", {})
-        weather_desc = ""
-        if raw.get("weather"):
-            weather_desc = raw["weather"][0].get("description", "")
+    def _parse_forecast(city: City, raw: dict[str, Any]) -> dict[str, Any]:
+        """Extract period forecast and aggregate fields from OWM response."""
+        items = raw.get("list", [])
+        if not items:
+            raise ValueError(f"Empty forecast response for {city.name}")
 
-        print({
-            "city": city.name,
-            "temp": main.get("temp", 0),
-            "feels_like": main.get("feels_like", 0),
-            "pressure": main.get("pressure", 0),
-            "humidity": main.get("humidity", 0),
-            "wind_speed": wind.get("speed", 0),
-            "wind_gust": wind.get("gust", 0),
-            "description": weather_desc,
-        })
-        
+        first_dt = datetime.strptime(items[0]["dt_txt"], "%Y-%m-%d %H:%M:%S")
+        target_date = first_dt.date() + timedelta(days=1)
+        target_date_str = target_date.isoformat()
+        target_times = {name: time_str for name, time_str in FORECAST_PERIODS}
+
+        day_items = [item for item in items if item.get("dt_txt", "").startswith(target_date_str)]
+        if not day_items:
+            raise ValueError(f"No forecast data for {city.name} on {target_date_str}")
+
+        periods: dict[str, dict[str, Any]] = {}
+        for item in day_items:
+            _, time_part = item["dt_txt"].split(" ")
+            for period_name, target_time in target_times.items():
+                if time_part == target_time:
+                    periods[period_name] = WeatherService._parse_item(item)
+
+        # If an exact slot is absent, use the nearest available time for that period.
+        for period_name, target_time in FORECAST_PERIODS:
+            if period_name not in periods:
+                periods[period_name] = WeatherService._parse_item(
+                    min(
+                        day_items,
+                        key=lambda item: abs(
+                            WeatherService._time_distance_seconds(
+                                item["dt_txt"].split(" ")[1],
+                                target_time,
+                            )
+                        ),
+                    )
+                )
+
+        ordered_periods = {
+            period_name: periods[period_name]
+            for period_name, _ in FORECAST_PERIODS
+        }
+        period_values = list(ordered_periods.values())
+        description = next(
+            (
+                ordered_periods[name]["description"]
+                for name in ("day", "morning", "evening", "night")
+                if ordered_periods[name]["description"]
+            ),
+            "",
+        )
+
         return {
             "city": city.name,
-            "temp": main.get("temp", 0),
+            "forecast_date": target_date_str,
+            "description": description,
+            "temp_min": min(item["temperature"] for item in period_values),
+            "temp_max": max(item["temperature"] for item in period_values),
+            "humidity": max(item["humidity"] for item in period_values),
+            "pressure": round(sum(item["pressure"] for item in period_values) / len(period_values)),
+            "wind_speed": max(item["wind_speed"] for item in period_values),
+            "wind_gust": max(item["wind_gust"] for item in period_values),
+            "periods": ordered_periods,
+        }
+
+    @staticmethod
+    def _parse_item(item: dict[str, Any]) -> dict[str, Any]:
+        main = item.get("main", {})
+        wind = item.get("wind", {})
+        weather = item.get("weather", [{}])[0]
+
+        return {
+            "time": item.get("dt_txt", ""),
+            "temperature": main.get("temp", 0),
             "feels_like": main.get("feels_like", 0),
             "pressure": main.get("pressure", 0),
             "humidity": main.get("humidity", 0),
+            "weather": weather.get("main", ""),
+            "description": weather.get("description", ""),
+            "clouds": item.get("clouds", {}).get("all", 0),
             "wind_speed": wind.get("speed", 0),
             "wind_gust": wind.get("gust", 0),
-            "description": weather_desc,
+            "rain": item.get("rain", {}).get("3h", 0),
         }
+
+    @staticmethod
+    def _time_distance_seconds(actual_time: str, target_time: str) -> int:
+        actual = datetime.strptime(actual_time, "%H:%M:%S")
+        target = datetime.strptime(target_time, "%H:%M:%S")
+        return int((actual - target).total_seconds())
