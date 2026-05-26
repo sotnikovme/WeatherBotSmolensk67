@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 
 
-API_KEY = "48b221bd88c2691ad84bb4e29ecf81ff"
+API_KEY = "48b221bd88c2691ad84bb4e\=9ecf81ff"
 
 
 def get_weather_params(city: str):
