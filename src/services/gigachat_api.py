@@ -98,6 +98,18 @@ MONTHS = {
 }
 
 
+DETAILED_PERIOD_KEYS: tuple[str, ...] = (
+    "night_00_03",
+    "night_03_06",
+    "morning_06_09",
+    "morning_09_12",
+    "day_12_15",
+    "day_15_18",
+    "evening_18_21",
+    "evening_21_24",
+)
+
+
 class GigaChatService:
     """Async wrapper over GigaChat SDK."""
 
@@ -175,23 +187,39 @@ class GigaChatService:
         forecast_date_iso = str(data.get("forecast_date", now.date().isoformat()))
         forecast_date = GigaChatService._format_date(forecast_date_iso)
         weekday = GigaChatService._weekday_name(forecast_date_iso)
-
         temp_min = GigaChatService._format_temp_value(data.get("temp_min", "?"))
         temp_max = GigaChatService._format_temp_value(data.get("temp_max", "?"))
-
+        detailed_periods = data.get("detailed_periods", {})
+        period_names = {
+            "night_00_03": "Ночь (00-03)",
+            "night_03_06": "Ночь (03-06)",
+            "morning_06_09": "Утро (06-09)",
+            "morning_09_12": "Утро (09-12)",
+            "day_12_15": "День (12-15)",
+            "day_15_18": "День (15-18)",
+            "evening_18_21": "Вечер (18-21)",
+            "evening_21_24": "Вечер (21-24)",
+        }
+        period_labels = {
+            key: GigaChatService._format_temp_range(
+                detailed_periods.get(key, {}).get("temp_min"),
+                detailed_periods.get(key, {}).get("temp_max"),
+            )
+            for key in DETAILED_PERIOD_KEYS
+        }
 
         lines = [
             "Собери готовый прогноз строго по шаблону ниже.",
-            "Отступать от структуры нельзя.",
+            "Порядок блоков менять нельзя.",
             f"Дата генерации: {generated_date}",
             f"Город: {city}",
             f"Дата прогноза: {forecast_date}",
-            f"День недели прогноза: {weekday}",
+            f"День недели: {weekday}",
             f"Сводка за сутки: {data.get('description', 'нет данных')}",
             f"Температура за сутки: {temp_min}...{temp_max}",
             (
                 "Ветер за сутки: "
-                f"{data.get('wind_direction_text', 'без уточнения направления')} "
+                f"{data.get('wind_direction_text', 'без направления')} "
                 f"{data.get('wind_speed', '?')}-{data.get('wind_gust', '?')} м/с"
             ),
             (
@@ -199,6 +227,28 @@ class GigaChatService:
                 f"{data.get('pressure_mm_min', '?')}...{data.get('pressure_mm_max', '?')} мм рт. ст.; "
                 f"тренд {data.get('pressure_mm_trend', 'нет данных')}"
             ),
+            "",
+            "Используй эти точные 3-часовые блоки при заполнении прогноза:",
+            "Температурный диапазон в каждом блоке копируй дословно из строки блока ниже.",
+            "Нельзя усреднять температуру между соседними блоками и нельзя повторять диапазон из другого блока.",
+        ]
+
+        for key in DETAILED_PERIOD_KEYS:
+            period = detailed_periods.get(key, {})
+            label = period.get("label") or period_names[key]
+            lines.append(
+                f"- {label}: диапазон {period_labels[key]}, "
+                f"ощущается как {GigaChatService._format_temp_value(period.get('feels_like', '?'))}, "
+                f"описание {period.get('description', 'нет данных')}, "
+                f"облачность {period.get('clouds', '?')}%, "
+                f"осадки {period.get('rain', 0)} мм, "
+                f"ветер {GigaChatService._format_wind(period)}, "
+                f"давление {period.get('pressure_mm', '?')} мм рт. ст."
+            )
+
+        lines.extend([
+            "Собери готовый прогноз строго по шаблону ниже.",
+            "Отступать от структуры нельзя.",
             "",
             "Шаблон ответа:",
             "🇷🇺Прогноз погоды по {Город Смоленской области} на {Дата}.",
@@ -271,22 +321,8 @@ class GigaChatService:
             "и так далее по переданным дням.",
             "",
             "Данные по 8 интервалам:",
-        ]
+        ])
 
-        for key, period in data.get("detailed_periods", {}).items():
-            label = period.get("label", key)
-            wind = GigaChatService._format_wind(period)
-            lines.append(
-                f"- {label}: температура {GigaChatService._format_temp_value(period.get('temperature'))}, "
-                f"ощущается как {GigaChatService._format_temp_value(period.get('feels_like'))}, "
-                f"описание {period.get('description', 'нет данных')}, "
-                f"облачность {period.get('clouds', '?')}%, "
-                f"осадки {period.get('rain', 0)} мм, "
-                f"ветер {wind}, "
-                f"давление {period.get('pressure_mm', '?')} мм рт. ст."
-            )
-
-        lines.extend(["", "Данные по 4 сводным периодам:"])
         for key in ("night", "morning", "day", "evening"):
             period = data.get("periods", {}).get(key, {})
             lines.append(
@@ -310,20 +346,13 @@ class GigaChatService:
         lines.extend(
             [
                 "",
-                "Ключевые требования к финальному тексту:",
-                "1. Сохрани порядок блоков один в один.",
-                "2. Не добавляй лишние заголовки вроде 'Суммарно', 'Ветер', 'Давление'.",
-                "3. В каждом временном блоке обязательно поставь подходящий стикер.",
-                "4. Стикер должен соответствовать описанию периода.",
-                "5. Во всех температурных строках используй целые значения и формат с плюсом, например +17.",
-                "6. Для диапазонов используй формат +17…+21.",
-                "7. Если в периоде есть дождь, ливень, гроза или туман, это должно отражаться и в тексте, и в стикере.",
-                "8. Блок 'Погода на несколько дней' заполни по всем переданным дням, без выдуманных дат.",
-                "9. Не сокращай ответ до короткой сводки.",
-                "10. Верни только готовый текст прогноза.",
-                "11. Не пропускай вступительную фразу, заголовок и два аналитических абзаца.",
-                "12. Если заголовок начинается с # или похож на markdown-заголовок, это ошибка.",
-                "13. Не начинай блоки с погодой, пока не завершена творческая часть в начале.",
+                "Финальные требования:",
+                "1. Сохрани вступительную фразу, заголовок и два аналитических абзаца перед первым временным блоком.",
+                "2. Используй все восемь 3-часовых блоков в точном порядке.",
+                "3. Температурный диапазон каждого блока копируй ровно из данных этого блока.",
+                "4. Если в блоке передан диапазон +17...+17, оставь его как есть; если передан +17...+21, не сокращай его до одного числа.",
+                "5. Не выдумывай даты и погодные факты.",
+                "6. Верни только готовый текст прогноза.",
             ]
         )
 
@@ -365,7 +394,7 @@ class GigaChatService:
             parts.extend(
                 [
                     f"{period.get('label', key)} ⛅ "
-                    f"{GigaChatService._format_temp_value(period.get('temperature'))}",
+                    f"{GigaChatService._format_temp_range(period.get('temp_min'), period.get('temp_max'))}",
                     f"🌬 {GigaChatService._format_wind(period)}",
                     period.get("description", "Без уточнений."),
                     "",
@@ -437,6 +466,13 @@ class GigaChatService:
             rounded = round(value)
             return f"{rounded:+d}"
         return str(value)
+
+    @staticmethod
+    def _format_temp_range(min_value: Any, max_value: Any) -> str:
+        return (
+            f"{GigaChatService._format_temp_value(min_value)}..."
+            f"{GigaChatService._format_temp_value(max_value)}"
+        )
 
     @staticmethod
     def _format_wind(period: dict[str, Any]) -> str:

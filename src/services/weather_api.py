@@ -24,6 +24,9 @@ DETAILED_PERIODS: tuple[tuple[str, str, str], ...] = (
     ("evening_18_21", "Вечер (18-21)", "18:00:00"),
     ("evening_21_24", "Вечер (21-24)", "21:00:00"),
 )
+DETAILED_TARGET_TIMES: tuple[str, ...] = tuple(
+    target_time for _, _, target_time in DETAILED_PERIODS
+)
 SUMMARY_PERIODS: tuple[tuple[str, str, tuple[str, str]], ...] = (
     ("night", "Ночь", ("night_00_03", "night_03_06")),
     ("morning", "Утро", ("morning_06_09", "morning_09_12")),
@@ -174,6 +177,26 @@ class WeatherService:
         if not available_dates:
             raise ValueError("Forecast payload does not contain valid dt_txt values")
 
+        grouped_times: dict[date, set[str]] = {}
+        for item in items:
+            dt_txt = item.get("dt_txt")
+            if not dt_txt:
+                continue
+            parsed_dt = datetime.strptime(dt_txt, "%Y-%m-%d %H:%M:%S")
+            grouped_times.setdefault(parsed_dt.date(), set()).add(parsed_dt.strftime("%H:%M:%S"))
+
+        full_dates = [
+            current_date
+            for current_date in available_dates
+            if all(target_time in grouped_times.get(current_date, set()) for target_time in DETAILED_TARGET_TIMES)
+        ]
+
+        if today_local in full_dates:
+            return today_local
+
+        if full_dates:
+            return full_dates[0]
+
         if today_local in available_dates:
             return today_local
 
@@ -182,17 +205,24 @@ class WeatherService:
     @staticmethod
     def _build_detailed_periods(day_items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         detailed_periods: dict[str, dict[str, Any]] = {}
+        items_by_time = {
+            item["dt_txt"].split(" ")[1]: item
+            for item in day_items
+            if item.get("dt_txt")
+        }
 
         for key, label, target_time in DETAILED_PERIODS:
-            chosen_item = min(
-                day_items,
-                key=lambda item: abs(
-                    WeatherService._time_distance_seconds(
-                        item["dt_txt"].split(" ")[1],
-                        target_time,
-                    )
-                ),
-            )
+            chosen_item = items_by_time.get(target_time)
+            if chosen_item is None:
+                chosen_item = min(
+                    day_items,
+                    key=lambda item: abs(
+                        WeatherService._time_distance_seconds(
+                            item["dt_txt"].split(" ")[1],
+                            target_time,
+                        )
+                    ),
+                )
             parsed = WeatherService._parse_item(chosen_item)
             parsed["label"] = label
             detailed_periods[key] = parsed
@@ -212,8 +242,8 @@ class WeatherService:
 
             summary_periods[key] = {
                 "label": label,
-                "temp_min": min(slot["temperature"] for slot in slots),
-                "temp_max": max(slot["temperature"] for slot in slots),
+                "temp_min": min(slot["temp_min"] for slot in slots),
+                "temp_max": max(slot["temp_max"] for slot in slots),
                 "temperature": round(mean(slot["temperature"] for slot in slots)),
                 "feels_like": round(mean(slot["feels_like"] for slot in slots)),
                 "pressure": round(mean(slot["pressure"] for slot in slots)),
@@ -275,6 +305,8 @@ class WeatherService:
         return {
             "time": item.get("dt_txt", ""),
             "temperature": round(main.get("temp", 0)),
+            "temp_min": round(main.get("temp_min", main.get("temp", 0))),
+            "temp_max": round(main.get("temp_max", main.get("temp", 0))),
             "feels_like": round(main.get("feels_like", 0)),
             "pressure": pressure_hpa,
             "pressure_mm": WeatherService._hpa_to_mmhg(pressure_hpa),
