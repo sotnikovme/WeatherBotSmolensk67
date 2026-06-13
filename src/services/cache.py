@@ -12,6 +12,7 @@ import redis.asyncio as aioredis
 from src.config import Settings, settings
 
 logger = logging.getLogger(__name__)
+POST_CACHE_VERSION = "v2"
 
 
 def _hour_key() -> str:
@@ -68,11 +69,11 @@ class CacheService:
     async def get_post(self, city_name: str) -> str | None:
         """Return cached GigaChat post or None."""
         assert self._redis is not None
-        key = f"gigachat:{city_name}:{_hour_key()}"
+        key = f"gigachat:{POST_CACHE_VERSION}:{city_name}:{_hour_key()}"
         return await self._redis.get(key)
 
     async def set_post(self, city_name: str, text: str) -> None:
         """Store GigaChat post in cache."""
         assert self._redis is not None
-        key = f"gigachat:{city_name}:{_hour_key()}"
+        key = f"gigachat:{POST_CACHE_VERSION}:{city_name}:{_hour_key()}"
         await self._redis.set(key, text, ex=self._cfg.cache_ttl_seconds)

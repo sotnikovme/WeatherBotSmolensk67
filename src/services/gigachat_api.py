@@ -132,24 +132,7 @@ class GigaChatService:
 
     async def generate_post(self, weather_data: dict[str, Any]) -> str:
         """Generate a literary weather post from forecast data."""
-        assert self._client is not None, "Call start() first"
-
-        chat = Chat(
-            messages=[
-                Messages(role=MessagesRole.SYSTEM, content=SYSTEM_PROMPT),
-                Messages(
-                    role=MessagesRole.USER,
-                    content=self._build_user_prompt(weather_data),
-                ),
-            ],
-        )
-
-        try:
-            response = await self._client.achat(chat)
-            return response.choices[0].message.content
-        except Exception:
-            logger.exception("GigaChat request failed")
-            return self._fallback(weather_data)
+        return self._render_strict_post(weather_data)
 
     async def generate_alert(self, alerts: list[dict[str, Any]]) -> str:
         """Generate an alert message for extreme weather."""
@@ -187,9 +170,18 @@ class GigaChatService:
         forecast_date_iso = str(data.get("forecast_date", now.date().isoformat()))
         forecast_date = GigaChatService._format_date(forecast_date_iso)
         weekday = GigaChatService._weekday_name(forecast_date_iso)
+        local_now_raw = str(data.get("local_now", ""))
+        local_now_text = local_now_raw
+        try:
+            local_now = datetime.fromisoformat(local_now_raw)
+            local_now_text = local_now.strftime("%d.%m.%Y %H:%M")
+        except ValueError:
+            local_now = None
+        forecast_scope = str(data.get("forecast_scope", "full_day"))
         temp_min = GigaChatService._format_temp_value(data.get("temp_min", "?"))
         temp_max = GigaChatService._format_temp_value(data.get("temp_max", "?"))
         detailed_periods = data.get("detailed_periods", {})
+        active_period_keys = tuple(key for key in DETAILED_PERIOD_KEYS if key in detailed_periods)
         period_names = {
             "night_00_03": "Ночь (00-03)",
             "night_03_06": "Ночь (03-06)",
@@ -209,31 +201,53 @@ class GigaChatService:
         }
 
         lines = [
-            "Собери готовый прогноз строго по шаблону ниже.",
-            "Порядок блоков менять нельзя.",
-            f"Дата генерации: {generated_date}",
-            f"Город: {city}",
-            f"Дата прогноза: {forecast_date}",
-            f"День недели: {weekday}",
-            f"Сводка за сутки: {data.get('description', 'нет данных')}",
-            f"Температура за сутки: {temp_min}...{temp_max}",
-            (
-                "Ветер за сутки: "
-                f"{data.get('wind_direction_text', 'без направления')} "
-                f"{data.get('wind_speed', '?')}-{data.get('wind_gust', '?')} м/с"
-            ),
-            (
-                "Давление за сутки: "
-                f"{data.get('pressure_mm_min', '?')}...{data.get('pressure_mm_max', '?')} мм рт. ст.; "
-                f"тренд {data.get('pressure_mm_trend', 'нет данных')}"
-            ),
-            "",
-            "Используй эти точные 3-часовые блоки при заполнении прогноза:",
-            "Температурный диапазон в каждом блоке копируй дословно из строки блока ниже.",
-            "Нельзя усреднять температуру между соседними блоками и нельзя повторять диапазон из другого блока.",
+            # "Собери готовый прогноз строго по шаблону ниже.",
+            # "Порядок блоков менять нельзя.",
+            # f"Дата генерации: {generated_date}",
+            # f"Город: {city}",
+            # f"Дата прогноза: {forecast_date}",
+            # f"День недели: {weekday}",
+            # f"Сводка за сутки: {data.get('description', 'нет данных')}",
+            # f"Температура за сутки: {temp_min}...{temp_max}",
+            # (
+            #     "Ветер за сутки: "
+            #     f"{data.get('wind_direction_text', 'без направления')} "
+            #     f"{data.get('wind_speed', '?')}-{data.get('wind_gust', '?')} м/с"
+            # ),
+            # (
+            #     "Давление за сутки: "
+            #     f"{data.get('pressure_mm_min', '?')}...{data.get('pressure_mm_max', '?')} мм рт. ст.; "
+            #     f"тренд {data.get('pressure_mm_trend', 'нет данных')}"
+            # ),
+            # "",
+            # "Используй эти точные 3-часовые блоки при заполнении прогноза:",
+            # "Температурный диапазон в каждом блоке копируй дословно из строки блока ниже.",
+            # "Нельзя усреднять температуру между соседними блоками и нельзя повторять диапазон из другого блока.",
         ]
 
-        for key in DETAILED_PERIOD_KEYS:
+        if local_now_text:
+            lines.extend([
+                f"Локальное время в городе на момент генерации: {local_now_text}.",
+                f"Дата прогноза: {forecast_date}.",
+            ])
+
+        if forecast_scope == "remaining_day":
+            lines.extend([
+                "Режим прогноза: только оставшееся время текущего дня.",
+                "Если часть интервалов уже прошла, их нельзя возвращать в тексте.",
+                "Нельзя переключать прогноз на завтра, пока во входных данных есть хотя бы один оставшийся интервал на сегодня.",
+            ])
+
+        if active_period_keys:
+            remaining_labels = ", ".join(
+                detailed_periods.get(key, {}).get("label") or period_names[key]
+                for key in active_period_keys
+            )
+            lines.append(f"Оставшиеся доступные интервалы на сегодня: {remaining_labels}.")
+            lines.append("В итоговом сообщении можно добавлять только эти интервалы и никакие другие.")
+            lines.append("Если во входных данных нет блока для времени суток, этот блок нужно полностью пропустить в готовом тексте.")
+
+        for key in active_period_keys:
             period = detailed_periods.get(key, {})
             label = period.get("label") or period_names[key]
             lines.append(
@@ -242,11 +256,18 @@ class GigaChatService:
                 f"описание {period.get('description', 'нет данных')}, "
                 f"облачность {period.get('clouds', '?')}%, "
                 f"осадки {period.get('rain', 0)} мм, "
-                f"ветер {GigaChatService._format_wind(period)}, "
+                f"ветер {period.get('wind_speed', '?')}-{period.get('wind_gust', '?')} м/с, направление {period.get('wind_dir', 'нет данных')}, "
                 f"давление {period.get('pressure_mm', '?')} мм рт. ст."
             )
-
+        
         lines.extend([
+            "",
+            "ВАЖНО:",
+            "Температурные диапазоны по 3-часовым интервалам уже посчитаны во входных данных.",
+            "В финальном тексте переноси их без изменений.",
+            "Нельзя усреднять температуры между соседними блоками и нельзя повторять один и тот же диапазон во всех блоках, если во входных данных диапазоны различаются.",
+            "Если в данных для блока указано +16...+18, в ответе должен остаться ровно диапазон +16...+18.",
+            "",
             "Собери готовый прогноз строго по шаблону ниже.",
             "Отступать от структуры нельзя.",
             "",
@@ -325,10 +346,11 @@ class GigaChatService:
 
         for key in ("night", "morning", "day", "evening"):
             period = data.get("periods", {}).get(key, {})
+            if period.get("temp_min") is None:
+                continue
             lines.append(
                 f"- {period.get('label', key)}: "
-                f"{GigaChatService._format_temp_value(period.get('temp_min'))}..."
-                f"{GigaChatService._format_temp_value(period.get('temp_max'))}, "
+                f"{GigaChatService._format_temp_range(period.get('temp_min'), period.get('temp_max'))}, "
                 f"{period.get('description', 'нет данных')}, "
                 f"ветер {GigaChatService._format_wind(period)}, "
                 f"давление {period.get('pressure_mm', '?')} мм рт. ст."
@@ -343,102 +365,89 @@ class GigaChatService:
                 f"{item.get('description', 'нет данных')}"
             )
 
-        lines.extend(
-            [
-                "",
-                "Финальные требования:",
-                "1. Сохрани вступительную фразу, заголовок и два аналитических абзаца перед первым временным блоком.",
-                "2. Используй все восемь 3-часовых блоков в точном порядке.",
-                "3. Температурный диапазон каждого блока копируй ровно из данных этого блока.",
-                "4. Если в блоке передан диапазон +17...+17, оставь его как есть; если передан +17...+21, не сокращай его до одного числа.",
-                "5. Не выдумывай даты и погодные факты.",
-                "6. Верни только готовый текст прогноза.",
-            ]
-        )
-
         return "\n".join(lines)
 
     @staticmethod
     def _fallback(data: dict[str, Any]) -> str:
         """Plain-text fallback when GigaChat is unavailable."""
-        city = data.get("city", "Смоленск")
+        return GigaChatService._render_strict_post(data)
+
+    @staticmethod
+    def _render_strict_post(data: dict[str, Any]) -> str:
+        city = str(data.get("city", "Смоленск"))
         forecast_date = GigaChatService._format_date(str(data.get("forecast_date", "")))
+        summary_periods = data.get("periods", {})
+        detailed_periods = data.get("detailed_periods", {})
+        multi_day = data.get("multi_day", [])
+        temp_min = GigaChatService._format_temp_value(data.get("temp_min", "?"))
+        temp_max = GigaChatService._format_temp_value(data.get("temp_max", "?"))
+        description = GigaChatService._sentence(data.get("description", "переменная погода"))
+
         parts = [
             f"🇷🇺Прогноз погоды по {city} на {forecast_date}.",
             "",
-            "Прогноз подготовлен по данным модели без художественной обработки.",
+            GigaChatService._build_intro(city, description),
             "",
-            "СПОКОЙНЫЙ ДЕНЬ БЕЗ ЛИШНИХ СЮРПРИЗОВ",
+            GigaChatService._build_headline(description),
             "",
-            (
-                f"В течение суток в {city} ожидается "
-                f"{data.get('description', 'переменный характер погоды')}."
-            ),
-            "Основные параметры собраны автоматически из погодного прогноза.",
+            GigaChatService._build_analysis_paragraph_1(city, description, temp_min, temp_max),
+            "",
+            GigaChatService._build_analysis_paragraph_2(data),
             "",
         ]
 
-        for key in (
-            "night_00_03",
-            "night_03_06",
-            "morning_06_09",
-            "morning_09_12",
-            "day_12_15",
-            "day_15_18",
-            "evening_18_21",
-            "evening_21_24",
-        ):
-            period = data.get("detailed_periods", {}).get(key)
+        for key in DETAILED_PERIOD_KEYS:
+            period = detailed_periods.get(key)
             if not period:
                 continue
+            label = str(period.get("label", key))
+            sticker = GigaChatService._pick_sticker(period, label)
             parts.extend(
                 [
-                    f"{period.get('label', key)} ⛅ "
-                    f"{GigaChatService._format_temp_range(period.get('temp_min'), period.get('temp_max'))}",
+                    f"{label} {sticker} {GigaChatService._format_temp_range(period.get('temp_min'), period.get('temp_max'))}",
                     f"🌬 {GigaChatService._format_wind(period)}",
-                    period.get("description", "Без уточнений."),
+                    GigaChatService._sentence(period.get("description", "Без уточнений")),
                     "",
                 ]
             )
 
         for key in ("night", "morning", "day", "evening"):
-            period = data.get("periods", {}).get(key)
-            if not period:
+            period = summary_periods.get(key, {})
+            if period.get("temp_min") is None:
                 continue
-            parts.append(
-                f"{period.get('label', key)} ⛅ "
-                f"{GigaChatService._format_temp_value(period.get('temp_min'))}..."
-                f"{GigaChatService._format_temp_value(period.get('temp_max'))}"
+            label = str(period.get("label", key))
+            sticker = GigaChatService._pick_sticker(period, label)
+            parts.extend(
+                [
+                    f"{label} {sticker} {GigaChatService._format_temp_range(period.get('temp_min'), period.get('temp_max'))}",
+                    GigaChatService._build_summary_line(period),
+                ]
             )
-            parts.append(period.get("description", "Без уточнений."))
 
         parts.extend(
             [
                 "",
-                (
-                    "🌬 "
-                    f"Ветер {data.get('wind_direction_text', 'переменного направления')} "
-                    f"{data.get('wind_speed', '?')}-{data.get('wind_gust', '?')} м/с."
-                ),
+                f"🌬 {GigaChatService._build_general_wind_line(data)}",
                 "",
-                (
-                    "📈Давление будет меняться слабо: "
-                    f"{data.get('pressure_mm_trend', 'нет данных')} мм.рт.ст."
-                ),
-                "",
-                "Погода на несколько дней — ночь/день:",
-                "",
+                f"📈 Давление будет меняться {GigaChatService._build_pressure_line(data)}",
             ]
         )
 
-        for item in data.get("multi_day", []):
-            parts.append(
-                f"{GigaChatService._format_date(item.get('date'))} ⛅ "
-                f"{GigaChatService._format_temp_value(item.get('temp_min'))}/"
-                f"{GigaChatService._format_temp_value(item.get('temp_max'))}"
-            )
-            parts.append(item.get("description", "Без уточнений."))
-            parts.append("")
+        if multi_day:
+            parts.extend(["", "", "Погода на несколько дней — ночь/день:", ""])
+            for item in multi_day:
+                sticker = GigaChatService._pick_sticker(item, item.get("date", ""))
+                parts.extend(
+                    [
+                        f"{GigaChatService._format_date(item.get('date'))} {sticker} "
+                        f"{GigaChatService._format_temp_value(item.get('temp_min'))}/"
+                        f"{GigaChatService._format_temp_value(item.get('temp_max'))}",
+                        GigaChatService._sentence(item.get("description", "Без уточнений")),
+                        "",
+                    ]
+                )
+            if parts[-1] == "":
+                parts.pop()
 
         return "\n".join(parts).strip()
 
@@ -469,10 +478,53 @@ class GigaChatService:
 
     @staticmethod
     def _format_temp_range(min_value: Any, max_value: Any) -> str:
+        if min_value == max_value:
+            return GigaChatService._format_temp_value(min_value)
         return (
             f"{GigaChatService._format_temp_value(min_value)}..."
             f"{GigaChatService._format_temp_value(max_value)}"
         )
+
+    @staticmethod
+    def _filter_unavailable_periods(text: str, data: dict[str, Any]) -> str:
+        detailed_periods = data.get("detailed_periods", {})
+        allowed_labels = {
+            str(period.get("label", "")).strip()
+            for period in detailed_periods.values()
+            if period.get("label")
+        }
+        all_labels = {
+            "Ночь (00-03)",
+            "Ночь (03-06)",
+            "Утро (06-09)",
+            "Утро (09-12)",
+            "День (12-15)",
+            "День (15-18)",
+            "Вечер (18-21)",
+            "Вечер (21-24)",
+        }
+        blocked_labels = all_labels - allowed_labels
+        if not blocked_labels:
+            return text
+
+        lines = text.splitlines()
+        filtered: list[str] = []
+        skip_block = False
+
+        for line in lines:
+            stripped = line.strip()
+            if any(stripped.startswith(label) for label in blocked_labels):
+                skip_block = True
+                continue
+
+            if skip_block:
+                if not stripped:
+                    skip_block = False
+                continue
+
+            filtered.append(line)
+
+        return "\n".join(filtered).strip()
 
     @staticmethod
     def _format_wind(period: dict[str, Any]) -> str:
@@ -486,3 +538,129 @@ class GigaChatService:
         if gust not in (None, "", speed, "?"):
             return f"{base}-{gust} м/с"
         return f"{base} м/с"
+
+    @staticmethod
+    def _sentence(value: Any) -> str:
+        text = " ".join(str(value or "").strip().split())
+        if not text:
+            return "Без уточнений."
+        text = text[0].upper() + text[1:]
+        if text[-1] not in ".!?":
+            text += "."
+        return text
+
+    @staticmethod
+    def _headline_token(text: str) -> str:
+        lowered = text.lower()
+        mapping = (
+            ("гроза", "ГРОЗОВОЙ"),
+            ("лив", "ЛИВНЕВЫЙ"),
+            ("дожд", "ДОЖДЛИВЫЙ"),
+            ("снег", "СНЕЖНЫЙ"),
+            ("туман", "ТУМАННЫЙ"),
+            ("дымк", "ТУМАННЫЙ"),
+            ("мгла", "ТУМАННЫЙ"),
+            ("пасмур", "ПАСМУРНЫЙ"),
+            ("облач", "ОБЛАЧНЫЙ"),
+            ("ясно", "ЯСНЫЙ"),
+        )
+        for token, headline in mapping:
+            if token in lowered:
+                return headline
+        return "СПОКОЙНЫЙ"
+
+    @staticmethod
+    def _build_intro(city: str, description: str) -> str:
+        return f"В {city} сегодня ожидается {description.lower()}."
+
+    @staticmethod
+    def _build_headline(description: str) -> str:
+        return f"{GigaChatService._headline_token(description)} ДЕНЬ"
+
+    @staticmethod
+    def _build_analysis_paragraph_1(
+        city: str,
+        description: str,
+        temp_min: str,
+        temp_max: str,
+    ) -> str:
+        return (
+            f"В течение дня в {city} сохранится {description.lower()}. "
+            f"Температура в доступных интервалах будет держаться в пределах {temp_min}...{temp_max}. "
+            "Основные изменения в прогнозе стоит оценивать по отдельным временным блокам ниже."
+        )
+
+    @staticmethod
+    def _build_analysis_paragraph_2(data: dict[str, Any]) -> str:
+        detailed_periods = data.get("detailed_periods", {})
+        if not detailed_periods:
+            return "Дальнейшее развитие погоды зависит от следующих обновлений прогноза."
+
+        first_key = next(iter(detailed_periods))
+        last_key = next(reversed(detailed_periods))
+        first_period = detailed_periods[first_key]
+        last_period = detailed_periods[last_key]
+        first_label = first_period.get("label", first_key)
+        last_label = last_period.get("label", last_key)
+        first_desc = GigaChatService._sentence(first_period.get("description", "Без уточнений"))
+        last_desc = GigaChatService._sentence(last_period.get("description", "Без уточнений"))
+        return (
+            f"Ближайший ориентир по погоде — интервал {first_label.lower()}, где ожидается "
+            f"{first_desc[:-1].lower()}. "
+            f"К финалу дня, в блоке {last_label.lower()}, прогноз показывает, что "
+            f"{last_desc[:-1].lower()}. "
+            "Такой порядок помогает увидеть, как будет меняться погода по ходу оставшейся части суток."
+        )
+
+    @staticmethod
+    def _pick_sticker(period: dict[str, Any], label: str) -> str:
+        text = " ".join(
+            str(period.get(key, "")).lower()
+            for key in ("description", "weather")
+        )
+        is_night = "ноч" in label.lower()
+
+        if "гроз" in text:
+            return "⛈️"
+        if "лив" in text:
+            return "🌦️"
+        if "дожд" in text:
+            return "🌧️"
+        if "снег" in text:
+            return "❄️"
+        if any(token in text for token in ("туман", "дымк", "мгла")):
+            return "🌫️"
+        if any(token in text for token in ("пасмур", "облач")):
+            return "☁️"
+        if any(token in text for token in ("ясно", "clear")):
+            return "🌙" if is_night else "☀️"
+        return "🌙" if is_night else "⛅"
+
+    @staticmethod
+    def _build_summary_line(period: dict[str, Any]) -> str:
+        return GigaChatService._sentence(period.get("description", "Без уточнений"))
+
+    @staticmethod
+    def _build_general_wind_line(data: dict[str, Any]) -> str:
+        direction = str(data.get("wind_direction_text", "")).strip()
+        speed = data.get("wind_speed", "?")
+        gust = data.get("wind_gust")
+        if direction:
+            text = f"Ветер {direction} {speed}"
+        else:
+            text = f"Ветер {speed}"
+        if gust not in (None, "", speed, "?"):
+            text += f"-{gust} м/с"
+        else:
+            text += " м/с"
+        return text + "."
+
+    @staticmethod
+    def _build_pressure_line(data: dict[str, Any]) -> str:
+        pressure_min = data.get("pressure_mm_min")
+        pressure_max = data.get("pressure_mm_max")
+        if pressure_min is None and pressure_max is None:
+            return "без выраженного диапазона."
+        if pressure_min == pressure_max or pressure_max is None:
+            return f"около {pressure_min} мм рт. ст."
+        return f"в диапазоне {pressure_min}...{pressure_max} мм рт. ст."

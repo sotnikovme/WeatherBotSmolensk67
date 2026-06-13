@@ -1,4 +1,4 @@
-"""OpenWeatherMap forecast client for the Smolensk region."""
+﻿"""OpenWeatherMap forecast client for the Smolensk region."""
 
 from __future__ import annotations
 
@@ -105,6 +105,7 @@ class WeatherService:
         if not items:
             raise ValueError(f"Empty forecast response for {city.name}")
 
+        local_now = WeatherService._resolve_local_now(raw)
         target_date = WeatherService._resolve_target_date(raw, items)
         target_date_str = target_date.isoformat()
 
@@ -113,21 +114,33 @@ class WeatherService:
             raise ValueError(f"No forecast data for {city.name} on {target_date_str}")
 
         hourly_forecast = [WeatherService._parse_item(item) for item in day_items]
-        detailed_periods = WeatherService._build_detailed_periods(day_items)
+        detailed_periods = WeatherService._build_detailed_periods(
+            items,
+            target_date,
+            local_now,
+        )
         summary_periods = WeatherService._build_summary_periods(detailed_periods)
 
-        period_values = list(summary_periods.values())
+        period_values = [
+            item for item in summary_periods.values() if item.get("temp_min") is not None
+        ]
+        if not period_values:
+            raise ValueError(f"No usable forecast periods for {city.name} on {target_date_str}")
         description = next(
             (
                 summary_periods[name]["description"]
                 for name, _, _ in SUMMARY_PERIODS
-                if summary_periods[name]["description"]
+                if summary_periods[name]["description"] and summary_periods[name]["description"] != "нет данных"
             ),
             "",
         )
 
         daily_forecast = WeatherService._build_multi_day_forecast(items, target_date)
-        pressure_values = [period["pressure_mm"] for period in detailed_periods.values()]
+        pressure_values = [
+            period["pressure_mm"]
+            for period in detailed_periods.values()
+            if period.get("pressure_mm") is not None
+        ]
         wind_dirs = [
             period["wind_dir"]
             for period in detailed_periods.values()
@@ -137,14 +150,18 @@ class WeatherService:
         return {
             "city": city.name,
             "forecast_date": target_date_str,
+            "local_now": local_now.strftime("%Y-%m-%d %H:%M:%S"),
+            "forecast_scope": (
+                "remaining_day" if target_date == local_now.date() else "full_day"
+            ),
             "description": description,
             "temp_min": min(item["temp_min"] for item in period_values),
             "temp_max": max(item["temp_max"] for item in period_values),
             "humidity": max(item["humidity"] for item in period_values),
             "pressure": round(mean(item["pressure"] for item in period_values)),
-            "pressure_mm_min": min(pressure_values),
-            "pressure_mm_max": max(pressure_values),
-            "pressure_mm_trend": ">".join(str(value) for value in pressure_values),
+            "pressure_mm_min": min(pressure_values) if pressure_values else None,
+            "pressure_mm_max": max(pressure_values) if pressure_values else None,
+            "pressure_mm_trend": ">".join(str(value) for value in pressure_values) if pressure_values else "нет данных",
             "wind_speed": max(item["wind_speed"] for item in period_values),
             "wind_gust": max(item["wind_gust"] for item in period_values),
             "wind_direction_text": WeatherService._join_wind_directions(wind_dirs),
@@ -156,15 +173,8 @@ class WeatherService:
 
     @staticmethod
     def _resolve_target_date(raw: dict[str, Any], items: list[dict[str, Any]]) -> date:
-        """Pick the forecast date for the city's current local day.
-
-        OWM returns forecast items in 3-hour steps starting from the next available slot.
-        When there are no remaining slots for the current local day, fall back to the
-        first available forecast date instead of incorrectly shifting to "tomorrow".
-        """
-        city_info = raw.get("city", {})
-        timezone_offset = int(city_info.get("timezone", 0))
-        local_now = datetime.now(timezone.utc) + timedelta(seconds=timezone_offset)
+        """Pick today's local date only when it still has active forecast periods."""
+        local_now = WeatherService._resolve_local_now(raw)
         today_local = local_now.date()
 
         available_dates = sorted(
@@ -177,53 +187,103 @@ class WeatherService:
         if not available_dates:
             raise ValueError("Forecast payload does not contain valid dt_txt values")
 
-        grouped_times: dict[date, set[str]] = {}
-        for item in items:
-            dt_txt = item.get("dt_txt")
-            if not dt_txt:
-                continue
-            parsed_dt = datetime.strptime(dt_txt, "%Y-%m-%d %H:%M:%S")
-            grouped_times.setdefault(parsed_dt.date(), set()).add(parsed_dt.strftime("%H:%M:%S"))
-
-        full_dates = [
-            current_date
-            for current_date in available_dates
-            if all(target_time in grouped_times.get(current_date, set()) for target_time in DETAILED_TARGET_TIMES)
-        ]
-
-        if today_local in full_dates:
+        if today_local in available_dates and WeatherService._has_remaining_periods(
+            items,
+            today_local,
+            local_now,
+        ):
             return today_local
 
-        if full_dates:
-            return full_dates[0]
+        future_dates = [current_date for current_date in available_dates if current_date > today_local]
+        if future_dates:
+            return future_dates[0]
 
-        if today_local in available_dates:
-            return today_local
-
-        return available_dates[0]
+        return available_dates[-1]
 
     @staticmethod
-    def _build_detailed_periods(day_items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    def _resolve_local_now(raw: dict[str, Any]) -> datetime:
+        """Return the city's current local time as a naive datetime."""
+        city_info = raw.get("city", {})
+        timezone_offset = int(city_info.get("timezone", 0))
+        utc_now = datetime.now(timezone.utc)
+        local_now = utc_now + timedelta(seconds=timezone_offset)
+        return local_now.replace(tzinfo=None)
+
+    @staticmethod
+    def _has_remaining_periods(
+        items: list[dict[str, Any]],
+        target_date: date,
+        local_now: datetime,
+    ) -> bool:
+        items_by_datetime = {
+            item["dt_txt"]: item
+            for item in items
+            if item.get("dt_txt")
+        }
+
+        for _, _, target_time in DETAILED_PERIODS:
+            start_dt = datetime.strptime(
+                f"{target_date.isoformat()} {target_time}",
+                "%Y-%m-%d %H:%M:%S",
+            )
+            end_dt = start_dt + timedelta(hours=3)
+            if end_dt <= local_now:
+                continue
+
+            start_key = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+            if start_key in items_by_datetime:
+                return True
+
+        return False
+
+    @staticmethod
+    def _build_detailed_periods(
+        items: list[dict[str, Any]],
+        target_date: date,
+        local_now: datetime,
+    ) -> dict[str, dict[str, Any]]:
         detailed_periods: dict[str, dict[str, Any]] = {}
-        items_by_time = {
-            item["dt_txt"].split(" ")[1]: item
-            for item in day_items
+        items_by_datetime = {
+            item["dt_txt"]: item
+            for item in items
             if item.get("dt_txt")
         }
 
         for key, label, target_time in DETAILED_PERIODS:
-            chosen_item = items_by_time.get(target_time)
+            start_dt = datetime.strptime(
+                f"{target_date.isoformat()} {target_time}",
+                "%Y-%m-%d %H:%M:%S",
+            )
+            end_dt = start_dt + timedelta(hours=3)
+            if target_date == local_now.date() and end_dt <= local_now:
+                continue
+
+            start_key = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+            end_key = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+            chosen_item = items_by_datetime.get(start_key)
             if chosen_item is None:
-                chosen_item = min(
-                    day_items,
-                    key=lambda item: abs(
-                        WeatherService._time_distance_seconds(
-                            item["dt_txt"].split(" ")[1],
-                            target_time,
-                        )
-                    ),
-                )
+                continue
+
             parsed = WeatherService._parse_item(chosen_item)
+            boundary_temperatures = [
+                parsed["temperature"],
+                parsed["temp_min"],
+                parsed["temp_max"],
+            ]
+            end_item = items_by_datetime.get(end_key)
+            if end_item is not None:
+                end_parsed = WeatherService._parse_item(end_item)
+                boundary_temperatures.extend(
+                    [
+                        end_parsed["temperature"],
+                        end_parsed["temp_min"],
+                        end_parsed["temp_max"],
+                    ]
+                )
+
+            parsed["temp_min"] = min(boundary_temperatures)
+            parsed["temp_max"] = max(boundary_temperatures)
             parsed["label"] = label
             detailed_periods[key] = parsed
 
@@ -236,7 +296,14 @@ class WeatherService:
         summary_periods: dict[str, dict[str, Any]] = {}
 
         for key, label, members in SUMMARY_PERIODS:
-            slots = [detailed_periods[member] for member in members]
+            slots = [
+                detailed_periods[member]
+                for member in members
+                if detailed_periods.get(member) and detailed_periods[member].get("temperature") is not None
+            ]
+            if not slots:
+                summary_periods[key] = WeatherService._empty_period(label)
+                continue
             descriptions = [slot["description"] for slot in slots if slot.get("description")]
             wind_dirs = [slot["wind_dir"] for slot in slots if slot.get("wind_dir")]
 
@@ -304,10 +371,10 @@ class WeatherService:
 
         return {
             "time": item.get("dt_txt", ""),
-            "temperature": round(main.get("temp", 0)),
-            "temp_min": round(main.get("temp_min", main.get("temp", 0))),
-            "temp_max": round(main.get("temp_max", main.get("temp", 0))),
-            "feels_like": round(main.get("feels_like", 0)),
+            "temperature": float(main.get("temp", 0)),
+            "temp_min": float(main.get("temp_min", main.get("temp", 0))),
+            "temp_max": float(main.get("temp_max", main.get("temp", 0))),
+            "feels_like": float(main.get("feels_like", 0)),
             "pressure": pressure_hpa,
             "pressure_mm": WeatherService._hpa_to_mmhg(pressure_hpa),
             "humidity": main.get("humidity", 0),
@@ -319,6 +386,28 @@ class WeatherService:
             "wind_deg": wind.get("deg"),
             "wind_dir": WeatherService._deg_to_direction(wind.get("deg")),
             "rain": round(item.get("rain", {}).get("3h", 0), 1),
+        }
+
+    @staticmethod
+    def _empty_period(label: str) -> dict[str, Any]:
+        return {
+            "label": label,
+            "time": "",
+            "temperature": None,
+            "temp_min": None,
+            "temp_max": None,
+            "feels_like": None,
+            "pressure": None,
+            "pressure_mm": None,
+            "humidity": None,
+            "weather": "",
+            "description": "нет данных",
+            "clouds": None,
+            "wind_speed": None,
+            "wind_gust": None,
+            "wind_deg": None,
+            "wind_dir": "",
+            "rain": 0,
         }
 
     @staticmethod
@@ -389,3 +478,6 @@ class WeatherService:
         actual = datetime.strptime(actual_time, "%H:%M:%S")
         target = datetime.strptime(target_time, "%H:%M:%S")
         return int((actual - target).total_seconds())
+
+
+

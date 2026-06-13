@@ -19,11 +19,11 @@ from src.database.session import async_session
 from src.services.cache import CacheService
 from src.services.gigachat_api import GigaChatService
 from src.services.weather_api import WeatherService
-from src.utils.formatting import escape_md
 
 logger = logging.getLogger(__name__)
 
 router = Router(name="main")
+MAX_TELEGRAM_TEXT_LENGTH = 4096
 
 # These will be injected from main.py via router context or middleware
 _weather: WeatherService | None = None
@@ -41,6 +41,45 @@ def inject_services(
     _weather = weather
     _gigachat = gigachat
     _cache = cache
+
+
+def _split_message(text: str, limit: int = MAX_TELEGRAM_TEXT_LENGTH) -> list[str]:
+    """Split long text into Telegram-sized chunks, preferring paragraph boundaries."""
+    normalized = text.strip()
+    if len(normalized) <= limit:
+        return [normalized]
+
+    chunks: list[str] = []
+    remaining = normalized
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n\n", 0, limit)
+        if split_at == -1:
+            split_at = remaining.rfind("\n", 0, limit)
+        if split_at == -1:
+            split_at = remaining.rfind(" ", 0, limit)
+        if split_at == -1:
+            split_at = limit
+
+        chunk = remaining[:split_at].strip()
+        if not chunk:
+            chunk = remaining[:limit].strip()
+            split_at = limit
+
+        chunks.append(chunk)
+        remaining = remaining[split_at:].strip()
+
+    if remaining:
+        chunks.append(remaining)
+
+    return chunks
+
+
+async def _send_forecast_text(wait_msg: Message, text: str) -> None:
+    """Edit the waiting message and continue in follow-up messages if needed."""
+    chunks = _split_message(text)
+    await wait_msg.edit_text(chunks[0])
+    for chunk in chunks[1:]:
+        await wait_msg.answer(chunk)
 
 
 # ======================================================================
@@ -110,8 +149,7 @@ async def on_city_selected(callback: CallbackQuery) -> None:
             post = await _gigachat.generate_post(weather_data)
             await _cache.set_post(city.name, post)
 
-        text = escape_md(post)
-        await wait_msg.edit_text(text, parse_mode="MarkdownV2")
+        await _send_forecast_text(wait_msg, post)
 
     except Exception:
         logger.exception("Failed to get weather for %s", city.name)
