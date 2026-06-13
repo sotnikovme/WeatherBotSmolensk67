@@ -86,6 +86,7 @@ async def _send_forecast_text(wait_msg: Message, text: str) -> None:
 # /start command
 # ======================================================================
 
+
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     """Register user and show main menu."""
@@ -95,22 +96,23 @@ async def cmd_start(message: Message) -> None:
         await get_or_create_user(session, message.from_user.id)
 
     await message.answer(
-        "👋 Привет\\! Я — бот погоды для *Смоленской области*\\.\n\n"
-        "Выберите действие на клавиатуре ниже\\.",
+        "\U0001f44b \u041f\u0440\u0438\u0432\u0435\u0442\\! \u042f \u2014 \u0431\u043e\u0442 \u043f\u043e\u0433\u043e\u0434\u044b \u0434\u043b\u044f *\u0421\u043c\u043e\u043b\u0435\u043d\u0441\u043a\u043e\u0439 \u043e\u0431\u043b\u0430\u0441\u0442\u0438*\\.\n\n"
+        "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u043d\u0430 \u043a\u043b\u0430\u0432\u0438\u0430\u0442\u0443\u0440\u0435 \u043d\u0438\u0436\u0435\\.",
         parse_mode="MarkdownV2",
         reply_markup=main_menu_kb(),
     )
 
 
 # ======================================================================
-# "Погода сейчас" — city selection
+# "\u041f\u043e\u0433\u043e\u0434\u0430 \u0441\u0435\u0439\u0447\u0430\u0441" - city selection
 # ======================================================================
 
-@router.message(F.text == "🌤 Погода сейчас")
+
+@router.message(F.text == "\U0001f324 \u041f\u043e\u0433\u043e\u0434\u0430 \u0441\u0435\u0439\u0447\u0430\u0441")
 async def weather_now(message: Message) -> None:
     """Show city picker."""
     await message.answer(
-        "Выберите город:",
+        "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043d\u0430\u0441\u0435\u043b\u0435\u043d\u043d\u044b\u0439 \u043f\u0443\u043d\u043a\u0442:",
         reply_markup=cities_kb(),
     )
 
@@ -126,11 +128,14 @@ async def on_city_selected(callback: CallbackQuery) -> None:
     city = next((c for c in SMOLENSK_CITIES if c.name == city_name), None)
 
     if city is None:
-        await callback.answer("Город не найден", show_alert=True)
+        await callback.answer(
+            "\u041d\u0430\u0441\u0435\u043b\u0435\u043d\u043d\u044b\u0439 \u043f\u0443\u043d\u043a\u0442 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d",
+            show_alert=True,
+        )
         return
 
     await callback.answer()
-    wait_msg = await callback.message.answer("⏳ Загружаю прогноз...")
+    wait_msg = await callback.message.answer("\u23f3 \u0417\u0430\u0433\u0440\u0443\u0436\u0430\u044e \u043f\u0440\u043e\u0433\u043d\u043e\u0437...")
 
     try:
         # 1. Check post cache
@@ -153,14 +158,18 @@ async def on_city_selected(callback: CallbackQuery) -> None:
 
     except Exception:
         logger.exception("Failed to get weather for %s", city.name)
-        await wait_msg.edit_text("❌ Не удалось получить прогноз. Попробуйте позже.")
+        await wait_msg.edit_text(
+            "\u274c \u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u043b\u0443\u0447\u0438\u0442\u044c "
+            "\u043f\u0440\u043e\u0433\u043d\u043e\u0437. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043f\u043e\u0437\u0436\u0435."
+        )
 
 
 # ======================================================================
-# "Настройки подписки"
+# "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0438"
 # ======================================================================
 
-@router.message(F.text == "⚙️ Настройки подписки")
+
+@router.message(F.text == "\u2699\ufe0f \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0438")
 async def subscription_settings(message: Message) -> None:
     """Show subscription toggles."""
     assert message.from_user is not None
@@ -169,7 +178,7 @@ async def subscription_settings(message: Message) -> None:
         user = await get_or_create_user(session, message.from_user.id)
 
     await message.answer(
-        "Управление подписками:",
+        "\u0423\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430\u043c\u0438:",
         reply_markup=settings_kb(user),
     )
 
@@ -184,8 +193,8 @@ async def on_toggle_morning(callback: CallbackQuery) -> None:
         new_val = await toggle_morning(session, callback.from_user.id)
         user = await get_or_create_user(session, callback.from_user.id)
 
-    status = "включена ✅" if new_val else "отключена ❌"
-    await callback.answer(f"Утренняя рассылка {status}")
+    status = "\u0432\u043a\u043b\u044e\u0447\u0435\u043d\u0430 \u2705" if new_val else "\u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u0430 \u274c"
+    await callback.answer(f"\u0423\u0442\u0440\u0435\u043d\u043d\u044f\u044f \u0440\u0430\u0441\u0441\u044b\u043b\u043a\u0430 {status}")
 
     await callback.message.edit_reply_markup(reply_markup=settings_kb(user))
 
@@ -200,8 +209,8 @@ async def on_toggle_alerts(callback: CallbackQuery) -> None:
         new_val = await toggle_alerts(session, callback.from_user.id)
         user = await get_or_create_user(session, callback.from_user.id)
 
-    status = "включены ✅" if new_val else "отключены ❌"
-    await callback.answer(f"Экстренные оповещения {status}")
+    status = "\u0432\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u2705" if new_val else "\u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u274c"
+    await callback.answer(f"\u042d\u043a\u0441\u0442\u0440\u0435\u043d\u043d\u044b\u0435 \u043e\u043f\u043e\u0432\u0435\u0449\u0435\u043d\u0438\u044f {status}")
 
     await callback.message.edit_reply_markup(reply_markup=settings_kb(user))
 
