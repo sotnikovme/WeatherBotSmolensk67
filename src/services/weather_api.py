@@ -106,6 +106,7 @@ class WeatherService:
             raise ValueError(f"Empty forecast response for {city.name}")
 
         local_now = WeatherService._resolve_local_now(raw)
+        items = WeatherService._localize_items(raw, items)
         target_date = WeatherService._resolve_target_date(raw, items)
         target_date_str = target_date.isoformat()
 
@@ -203,11 +204,45 @@ class WeatherService:
     @staticmethod
     def _resolve_local_now(raw: dict[str, Any]) -> datetime:
         """Return the city's current local time as a naive datetime."""
-        city_info = raw.get("city", {})
-        timezone_offset = int(city_info.get("timezone", 0))
+        timezone_offset = WeatherService._resolve_timezone_offset(raw)
         utc_now = datetime.now(timezone.utc)
         local_now = utc_now + timedelta(seconds=timezone_offset)
         return local_now.replace(tzinfo=None)
+
+    @staticmethod
+    def _resolve_timezone_offset(raw: dict[str, Any]) -> int:
+        city_info = raw.get("city", {})
+        return int(city_info.get("timezone", 0))
+
+    @staticmethod
+    def _localize_items(
+        raw: dict[str, Any],
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Convert OWM forecast timestamps from UTC to the city's local time."""
+        timezone_offset = WeatherService._resolve_timezone_offset(raw)
+        localized_items: list[dict[str, Any]] = []
+
+        for item in items:
+            local_item = dict(item)
+            original_dt_txt = item.get("dt_txt")
+            local_item["dt_txt_utc"] = original_dt_txt
+
+            if item.get("dt") is not None:
+                utc_dt = datetime.fromtimestamp(int(item["dt"]), tz=timezone.utc)
+            elif original_dt_txt:
+                utc_dt = datetime.strptime(original_dt_txt, "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=timezone.utc,
+                )
+            else:
+                localized_items.append(local_item)
+                continue
+
+            local_dt = (utc_dt + timedelta(seconds=timezone_offset)).replace(tzinfo=None)
+            local_item["dt_txt"] = local_dt.strftime("%Y-%m-%d %H:%M:%S")
+            localized_items.append(local_item)
+
+        return localized_items
 
     @staticmethod
     def _has_remaining_periods(

@@ -35,10 +35,10 @@ async def job_morning_post(
         data = await weather.get_forecast(city)
 
         # Check cache first
-        post = await cache.get_post(city.name)
+        post = await cache.get_post(city.name, data)
         if not post:
             post = await gigachat.generate_post(data)
-            await cache.set_post(city.name, post)
+            await cache.set_post(city.name, post, data)
 
         text = f"☀️ *Доброе утро\\!*\n\n{escape_md(post)}"
 

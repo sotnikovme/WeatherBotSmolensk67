@@ -66,14 +66,33 @@ class CacheService:
     # GigaChat post cache
     # ------------------------------------------------------------------
 
-    async def get_post(self, city_name: str) -> str | None:
+    @staticmethod
+    def _post_context_key(data: dict[str, Any] | None = None) -> str:
+        if not data:
+            return _hour_key()
+
+        period_keys = ",".join(data.get("detailed_periods", {}).keys())
+        return ":".join(
+            (
+                str(data.get("forecast_date", "unknown-date")),
+                str(data.get("forecast_scope", "unknown-scope")),
+                period_keys or "no-periods",
+            )
+        )
+
+    async def get_post(self, city_name: str, data: dict[str, Any] | None = None) -> str | None:
         """Return cached GigaChat post or None."""
         assert self._redis is not None
-        key = f"gigachat:{POST_CACHE_VERSION}:{city_name}:{_hour_key()}"
+        key = f"gigachat:{POST_CACHE_VERSION}:{city_name}:{self._post_context_key(data)}"
         return await self._redis.get(key)
 
-    async def set_post(self, city_name: str, text: str) -> None:
+    async def set_post(
+        self,
+        city_name: str,
+        text: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
         """Store GigaChat post in cache."""
         assert self._redis is not None
-        key = f"gigachat:{POST_CACHE_VERSION}:{city_name}:{_hour_key()}"
+        key = f"gigachat:{POST_CACHE_VERSION}:{city_name}:{self._post_context_key(data)}"
         await self._redis.set(key, text, ex=self._cfg.cache_ttl_seconds)

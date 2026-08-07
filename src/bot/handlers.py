@@ -138,21 +138,21 @@ async def on_city_selected(callback: CallbackQuery) -> None:
     wait_msg = await callback.message.answer("\u23f3 \u0417\u0430\u0433\u0440\u0443\u0436\u0430\u044e \u043f\u0440\u043e\u0433\u043d\u043e\u0437...")
 
     try:
-        # 1. Check post cache
-        post = await _cache.get_post(city.name)
+        # 1. Check weather cache
+        weather_data = await _cache.get_weather(city.name)
+
+        if weather_data is None:
+            # 2. Fetch from OWM
+            weather_data = await _weather.get_forecast(city)
+            await _cache.set_weather(city.name, weather_data)
+
+        # 3. Check post cache for this exact forecast window
+        post = await _cache.get_post(city.name, weather_data)
 
         if post is None:
-            # 2. Check weather cache
-            weather_data = await _cache.get_weather(city.name)
-
-            if weather_data is None:
-                # 3. Fetch from OWM
-                weather_data = await _weather.get_forecast(city)
-                await _cache.set_weather(city.name, weather_data)
-
             # 4. Generate post via GigaChat
             post = await _gigachat.generate_post(weather_data)
-            await _cache.set_post(city.name, post)
+            await _cache.set_post(city.name, post, weather_data)
 
         await _send_forecast_text(wait_msg, post)
 
