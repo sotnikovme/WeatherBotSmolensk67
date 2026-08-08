@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any
 
 import redis.asyncio as aioredis
@@ -12,7 +13,7 @@ import redis.asyncio as aioredis
 from src.config import Settings, settings
 
 logger = logging.getLogger(__name__)
-POST_CACHE_VERSION = "v2"
+POST_CACHE_VERSION = "v3"
 
 
 def _hour_key() -> str:
@@ -72,11 +73,15 @@ class CacheService:
             return _hour_key()
 
         period_keys = ",".join(data.get("detailed_periods", {}).keys())
+        payload_hash = sha256(
+            json.dumps(data, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
         return ":".join(
             (
                 str(data.get("forecast_date", "unknown-date")),
                 str(data.get("forecast_scope", "unknown-scope")),
                 period_keys or "no-periods",
+                payload_hash,
             )
         )
 

@@ -136,7 +136,14 @@ class WeatherService:
             "",
         )
 
-        daily_forecast = WeatherService._build_multi_day_forecast(items, target_date)
+        forecast_scope = (
+            "remaining_day" if target_date == local_now.date() else "full_day"
+        )
+        daily_forecast = WeatherService._build_multi_day_forecast(
+            items,
+            target_date,
+            start_offset=1 if forecast_scope == "remaining_day" else 0,
+        )
         pressure_values = [
             period["pressure_mm"]
             for period in detailed_periods.values()
@@ -152,9 +159,7 @@ class WeatherService:
             "city": city.name,
             "forecast_date": target_date_str,
             "local_now": local_now.strftime("%Y-%m-%d %H:%M:%S"),
-            "forecast_scope": (
-                "remaining_day" if target_date == local_now.date() else "full_day"
-            ),
+            "forecast_scope": forecast_scope,
             "description": description,
             "temp_min": min(item["temp_min"] for item in period_values),
             "temp_max": max(item["temp_max"] for item in period_values),
@@ -301,21 +306,11 @@ class WeatherService:
                 continue
 
             parsed = WeatherService._parse_item(chosen_item)
-            boundary_temperatures = [
-                parsed["temperature"],
-                parsed["temp_min"],
-                parsed["temp_max"],
-            ]
+            boundary_temperatures = [parsed["temperature"]]
             end_item = items_by_datetime.get(end_key)
             if end_item is not None:
                 end_parsed = WeatherService._parse_item(end_item)
-                boundary_temperatures.extend(
-                    [
-                        end_parsed["temperature"],
-                        end_parsed["temp_min"],
-                        end_parsed["temp_max"],
-                    ]
-                )
+                boundary_temperatures.append(end_parsed["temperature"])
 
             parsed["temp_min"] = min(boundary_temperatures)
             parsed["temp_max"] = max(boundary_temperatures)
@@ -369,6 +364,7 @@ class WeatherService:
         items: list[dict[str, Any]],
         start_date: date,
         days: int = 5,
+        start_offset: int = 0,
     ) -> list[dict[str, Any]]:
         grouped: dict[str, list[dict[str, Any]]] = {}
         for item in items:
@@ -377,7 +373,7 @@ class WeatherService:
                 grouped.setdefault(date_str, []).append(item)
 
         result: list[dict[str, Any]] = []
-        for offset in range(days):
+        for offset in range(start_offset, start_offset + days):
             date_value = start_date + timedelta(days=offset)
             date_str = date_value.isoformat()
             day_items = grouped.get(date_str)
@@ -389,8 +385,8 @@ class WeatherService:
             result.append(
                 {
                     "date": date_str,
-                    "temp_min": min(item["temperature"] for item in parsed_items),
-                    "temp_max": max(item["temperature"] for item in parsed_items),
+                    "temp_min": min(item["temp_min"] for item in parsed_items),
+                    "temp_max": max(item["temp_max"] for item in parsed_items),
                     "description": WeatherService._pick_description(descriptions),
                 }
             )
